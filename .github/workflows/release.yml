@@ -21,16 +21,17 @@ jobs:
       - name: Build .run installer (Docker)
         run: |
           docker buildx build \
+            -f docker/Dockerfile.cuda12.x.ubuntu20.04 \
             --platform linux/amd64 \
             --build-arg BUILD_DATE=$(date +%Y%m%d) \
             --output type=local,dest=dist \
             .
 
       - name: List artifacts
-        run: ls -lh dist/out
+        run: ls -lh dist
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/out/*.run
+            dist/*.run

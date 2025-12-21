@@ -149,9 +149,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends makeself && \
     "${PACKAGE_FILENAME}" \
     "SiHPC MPI + NCCL + NCCL-tests Portable Installer" \
     ./bin/install_sihpc && \
-    rm -rf /usr/local/sihpc && \
-    apt-get autoremove -y && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-CMD ["bash", "-c", "SAFE_NCCL_PKG=${NCCL_PACKAGE_VERSION//+/-}; FILE=\"sicl-nccl${SAFE_NCCL_PKG}-ompi${MPI_VERSION}-ubuntu${UBUNTU_VERSION}-${BUILD_DATE}.run\"; ls -lh \"/build/$FILE\" && echo 'Build complete.'"]
+    mv "$RUN_NAME"* /
