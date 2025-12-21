@@ -22,8 +22,8 @@ jobs:
             -f docker/Dockerfile.cuda12.x.ubuntu20.04 \
             --platform linux/amd64 \
             --target package \
-            --output type=local,dest=dist/${{ matrix.name }} \
+            --output type=local,dest=dist \
             .
       - name: List artifacts
         run: |
-          ls -lh dist/${{ matrix.name }}
+          ls -lh dist

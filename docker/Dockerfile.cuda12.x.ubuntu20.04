@@ -142,7 +142,7 @@ ENV NCCL_PACKAGE_VERSION=${NCCL_PACKAGE_VERSION} \
 
 COPY --from=build /usr/local/sihpc /usr/local/sihpc
 
-WORKDIR /dist
+WORKDIR /
 RUN apt-get update && apt-get install -y --no-install-recommends makeself && \
     chmod +x /usr/local/sihpc/bin/install_sihpc && \
     SAFE_NCCL_PKG=$(printf '%s\n' "${NCCL_PACKAGE_VERSION}" | tr '+' '-') && \
@@ -150,5 +150,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends makeself && \
     makeself --gzip /usr/local/sihpc \
     "${PACKAGE_FILENAME}" \
     "SiHPC MPI + NCCL + NCCL-tests Portable Installer" \
-    ./bin/install_sihpc && \
-    mv "$RUN_NAME"* /
+    ./bin/install_sihpc
