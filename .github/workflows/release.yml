@@ -1,4 +1,4 @@
-name: Release run installer
+name: release
 
 on:
   push:
@@ -9,13 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  build-and-release:
+    name: build-run (${{ matrix.name }})
     runs-on: ubuntu-22.04
 
-    steps:
-      - uses: actions/checkout@v4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cuda12.9-ubuntu22.04
+            dockerfile: docker/Dockerfile.cuda12.9.ubuntu22.04
+          - name: cuda13-ubuntu22.04
+            dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04
 
-      - name: Setup Docker Buildx
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Free disk space
@@ -27,20 +38,23 @@ jobs:
           sudo docker system prune -af || true
           df -h
 
-      - name: Build .run installer (Docker)
+      - name: Build run package
         run: |
+          BUILD_DATE=$(date +%Y%m%d)
+
           docker buildx build \
-            -f docker/Dockerfile.cuda12.x.ubuntu20.04 \
             --platform linux/amd64 \
-            --build-arg BUILD_DATE=$(date +%Y%m%d) \
-            --output type=local,dest=dist \
+            --progress=plain \
+            -f ${{ matrix.dockerfile }} \
+            --build-arg BUILD_DATE=${BUILD_DATE} \
+            --output type=local,dest=dist/${{ matrix.name }} \
             .
 
-      - name: List artifacts
-        run: ls -lh dist
+          echo "Produced files:"
+          ls -lh dist/${{ matrix.name }}
 
-      - name: Upload to GitHub Release
+      - name: Upload run to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.run
+            dist/${{ matrix.name }}/*.run
