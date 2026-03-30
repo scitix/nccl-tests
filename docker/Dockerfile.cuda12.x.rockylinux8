@@ -1,0 +1,144 @@
+###########################
+# Build-time configuration
+###########################
+
+ARG ROCKYLINUX_VERSION=8
+ARG CUDA_VERSION=12.8.1
+ARG CUDART_VERSION=12.8.90
+ARG CUDART_MAJOR_VERSION=12
+
+# NCCL versions
+ARG NCCL_PACKAGE_VERSION=2.27.7-1+cuda12.4
+ARG NCCL_RPM_VERSION=2.27.7-1
+ARG NCCL_SO_VERSION=2.27.7
+ARG NCCL_CUDA_VERSION=12.4
+
+# OpenMPI versions
+ARG MPI_VERSION=4.1.8
+ARG MPI_SERIES=4.1
+
+# Build date (override at build time)
+ARG BUILD_DATE=20251221
+
+###########################
+# Build Stage
+###########################
+FROM nvidia/cuda:${CUDA_VERSION}-devel-rockylinux8 AS build
+
+ARG ROCKYLINUX_VERSION
+ARG CUDA_VERSION
+ARG CUDART_VERSION
+ARG CUDART_MAJOR_VERSION
+ARG NCCL_PACKAGE_VERSION
+ARG NCCL_RPM_VERSION
+ARG NCCL_SO_VERSION
+ARG NCCL_CUDA_VERSION
+ARG MPI_VERSION
+ARG MPI_SERIES
+ARG BUILD_DATE
+
+WORKDIR /workspace
+
+# -------------------------
+# 1. Base build dependencies
+# -------------------------
+RUN dnf install -y epel-release && \
+    dnf install -y \
+        gcc gcc-c++ make automake autoconf libtool pkgconfig \
+        wget curl git ca-certificates which \
+        python3 python3-pip gzip xz && \
+    dnf clean all
+
+# -------------------------
+# 2. Install NCCL from NVIDIA repository
+#    Rocky Linux 8 / RHEL 8 repo is cuda-rhel8.repo
+# -------------------------
+RUN dnf config-manager --add-repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \
+    { dnf install -y \
+        libnccl-${NCCL_RPM_VERSION}.cuda${NCCL_CUDA_VERSION} \
+        libnccl-devel-${NCCL_RPM_VERSION}.cuda${NCCL_CUDA_VERSION} || \
+      dnf install -y libnccl libnccl-devel; } && \
+    dnf clean all
+
+# -------------------------
+# 3. Build OpenMPI from source
+#    Binaries will be linked against glibc 2.28 (Rocky Linux 8 default),
+#    so the resulting .run package runs on any RHEL 8-compatible system.
+# -------------------------
+RUN wget -q https://download.open-mpi.org/release/open-mpi/v${MPI_SERIES}/openmpi-${MPI_VERSION}.tar.gz && \
+    tar zxf openmpi-${MPI_VERSION}.tar.gz && \
+    cd openmpi-${MPI_VERSION} && \
+    ./configure --prefix=/usr/local/sihpc --with-cuda=/usr/local/cuda \
+        --disable-static --enable-shared > /dev/null 2>&1 && \
+    make -j$(nproc) > /dev/null 2>&1 && \
+    make install > /dev/null 2>&1 && \
+    rm -rf /workspace/openmpi-${MPI_VERSION} /workspace/openmpi-${MPI_VERSION}.tar.gz
+
+# -------------------------
+# 4. Build nccl-tests (use local source instead of cloning)
+# -------------------------
+COPY . /workspace/nccl-tests
+RUN cd /workspace/nccl-tests && \
+    make MPI=1 MPI_HOME=/usr/local/sihpc \
+        NVCC_GENCODE="-gencode=arch=compute_75,code=sm_75 \
+                      -gencode=arch=compute_80,code=sm_80 \
+                      -gencode=arch=compute_86,code=sm_86 \
+                      -gencode=arch=compute_90,code=sm_90" \
+        2>&1 | tee build.log && \
+    mkdir -p /usr/local/sihpc/libexec/nccl-tests && \
+    cp -rf build/*_perf /usr/local/sihpc/libexec/nccl-tests/ && \
+    mkdir -p /usr/local/sihpc/bin && \
+    cp scripts/nccl_perf /usr/local/sihpc/bin/nccl_perf && \
+    cp scripts/nccl_test /usr/local/sihpc/libexec/nccl-tests/nccl_test && \
+    cp scripts/env.sh /usr/local/sihpc/env.sh && \
+    cp scripts/install_sihpc /usr/local/sihpc/bin/install_sihpc && \
+    cp scripts/uninstall_sihpc /usr/local/sihpc/bin/uninstall_sihpc
+
+# -------------------------
+# 5. Collect runtime libraries
+# -------------------------
+RUN set -e && \
+    mkdir -p /usr/local/sihpc/lib && \
+    cp /usr/local/cuda/lib64/libcudart* /usr/local/sihpc/lib/ && \
+    { cp /usr/lib64/libnccl.so* /usr/local/sihpc/lib/ 2>/dev/null || \
+      find /usr -name 'libnccl.so*' -exec cp {} /usr/local/sihpc/lib/ \;; }
+
+# -------------------------
+# 6. Fix library symlinks
+# -------------------------
+RUN cd /usr/local/sihpc/lib && \
+    rm -f libcudart.so libcudart.so.${CUDART_MAJOR_VERSION} && \
+    { ln -sf libnccl.so.${NCCL_SO_VERSION} libnccl.so.2 2>/dev/null || true; } && \
+    { ln -sf libnccl.so.2 libnccl.so 2>/dev/null || true; } && \
+    ln -sf libcudart.so.${CUDART_VERSION} libcudart.so.${CUDART_MAJOR_VERSION} && \
+    ln -sf libcudart.so.${CUDART_MAJOR_VERSION} libcudart.so
+
+###########################
+# Package Stage
+###########################
+FROM rockylinux:8 AS package
+
+ARG ROCKYLINUX_VERSION
+ARG NCCL_PACKAGE_VERSION
+ARG MPI_VERSION
+ARG BUILD_DATE
+
+ENV NCCL_PACKAGE_VERSION=${NCCL_PACKAGE_VERSION} \
+    MPI_VERSION=${MPI_VERSION} \
+    BUILD_DATE=${BUILD_DATE}
+
+COPY --from=build /usr/local/sihpc /usr/local/sihpc
+
+WORKDIR /
+
+# makeself is available via EPEL on Rocky Linux 8
+RUN dnf install -y epel-release && \
+    dnf install -y makeself findutils && \
+    dnf clean all && \
+    SAFE_NCCL_PKG=$(printf '%s\n' "${NCCL_PACKAGE_VERSION}" | tr '+' '-') && \
+    PACKAGE_FILENAME="sicl-nccl${SAFE_NCCL_PKG}-ompi${MPI_VERSION}-rockylinux${ROCKYLINUX_VERSION}-${BUILD_DATE}.run" && \
+    makeself --gzip /usr/local/sihpc \
+        "${PACKAGE_FILENAME}" \
+        "SiHPC MPI + NCCL + NCCL-tests Portable Installer (Rocky Linux ${ROCKYLINUX_VERSION})" \
+        ./bin/install_sihpc
