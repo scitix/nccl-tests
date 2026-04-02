@@ -21,6 +21,8 @@ jobs:
             dockerfile: docker/Dockerfile.cuda12.9.ubuntu22.04
           - name: cuda13-ubuntu22.04
             dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04
+          - name: cuda12.x-rockylinux8
+            dockerfile: docker/Dockerfile.cuda12.x.rockylinux8
 
     steps:
       - name: Checkout source
@@ -28,6 +30,14 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.name }}-
 
       - name: Free disk space
         run: |
@@ -47,8 +57,14 @@ jobs:
             --progress=plain \
             -f ${{ matrix.dockerfile }} \
             --build-arg BUILD_DATE=${BUILD_DATE} \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --output type=local,dest=dist/${{ matrix.name }} \
             .
+
+          # rotate cache (avoid unbounded growth)
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
           echo "Produced files:"
           ls -lh dist/${{ matrix.name }}
