@@ -142,3 +142,12 @@ RUN dnf install -y epel-release && \
         "${PACKAGE_FILENAME}" \
         "SiHPC MPI + NCCL + NCCL-tests Portable Installer (Rocky Linux ${ROCKYLINUX_VERSION})" \
         ./bin/install_sihpc
+
+###########################
+# Export Stage
+###########################
+# Use a scratch image so that --output type=local only exports the .run file.
+# This avoids permission errors caused by root-owned OS files (e.g. /root/.bash_logout)
+# being written to the non-root GitHub Actions runner's workspace.
+FROM scratch AS export
+COPY --from=package /*.run /

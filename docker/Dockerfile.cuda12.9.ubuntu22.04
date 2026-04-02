@@ -151,3 +151,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends makeself && \
       "${PACKAGE_FILENAME}" \
       "SiHPC MPI + NCCL + NCCL-tests Portable Installer" \
       ./bin/install_sihpc > build.log 2>&1 && rm -f build.log; } || (cat build.log && false)
+
+###########################
+# Export Stage
+###########################
+# Use a scratch image so that --output type=local only exports the .run file.
+# This avoids permission errors caused by root-owned OS files being written
+# to the non-root GitHub Actions runner's workspace.
+FROM scratch AS export
+COPY --from=package /*.run /
