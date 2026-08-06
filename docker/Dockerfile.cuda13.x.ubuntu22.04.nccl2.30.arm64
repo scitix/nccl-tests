@@ -8,6 +8,10 @@ ARG CUDA_VERSION=13.1.0
 ARG CUDART_VERSION=13.1.80
 ARG CUDART_MAJOR_VERSION=13
 
+# CUDA apt repo architecture:
+#   x86_64 for amd64, sbsa for datacenter ARM (Grace / GH200 / Ampere Altra).
+ARG CUDA_REPO_ARCH=sbsa
+
 # NCCL versions (built from source and patched — see step 3)
 ARG NCCL_PACKAGE_VERSION=2.30.7-1
 ARG NCCL_SO_VERSION=2.30.7
@@ -37,6 +41,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
 ARG UBUNTU_VERSION
 ARG CUDA_VERSION
 ARG CUDART_VERSION
+ARG CUDA_REPO_ARCH
 ARG NCCL_PACKAGE_VERSION
 ARG NCCL_SO_VERSION
 ARG NCCL_SRC_REF
@@ -61,8 +66,9 @@ RUN { apt-get -o Acquire::http::No-Cache=true update > build.log 2>&1 && \
 
 # -------------------------
 # 2. Install CUDA keyring and restore NVIDIA repository
+#    (cuda-keyring is arch-independent; the repo path selects x86_64 vs sbsa)
 # -------------------------
-RUN { wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb > build.log 2>&1 && \
+RUN { wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/${CUDA_REPO_ARCH}/cuda-keyring_1.1-1_all.deb > build.log 2>&1 && \
     dpkg -i cuda-keyring_1.1-1_all.deb >> build.log 2>&1 && \
     apt-get update >> build.log 2>&1 && rm -f build.log; } || (cat build.log && false)
 
@@ -116,16 +122,13 @@ RUN git clone --depth 1 --single-branch -b sync/upstream-20251216 https://github
 
 # -------------------------
 # 6. Collect runtime libraries (strict selection)
+#    Note: libcudart lives in /usr/local/cuda/lib64 on both x86_64 and sbsa.
 # -------------------------
 RUN { set -e && \
     mkdir -p /usr/local/sihpc/lib > build.log 2>&1 && \
     cp /usr/local/cuda/lib64/libcudart* /usr/local/sihpc/lib/ >> build.log 2>&1 && \
     cp -P /usr/local/nccl/lib/libnccl.so* /usr/local/sihpc/lib/ >> build.log 2>&1 && \
     rm -f build.log; } || (cat build.log && false)
-#    cp /lib/x86_64-linux-gnu/libltdl.so.7.3.1 /usr/local/sihpc/lib/ && \
-#    cp /usr/lib/x86_64-linux-gnu/libhwloc.so* /usr/local/sihpc/lib/ && \
-#    cp /usr/lib/x86_64-linux-gnu/libevent_core* /usr/local/sihpc/lib/ && \
-#    cp /usr/lib/x86_64-linux-gnu/libevent_pthreads* /usr/local/sihpc/lib/
 
 # -------------------------
 # 7. Fix library symlinks
@@ -136,15 +139,6 @@ RUN cd /usr/local/sihpc/lib && \
     ln -sf libnccl.so.2 libnccl.so && \
     ln -sf libcudart.so.${CUDART_VERSION} libcudart.so.${CUDART_MAJOR_VERSION} && \
     ln -sf libcudart.so.${CUDART_MAJOR_VERSION} libcudart.so
-#    rm -f libevent_core-2.1.so.7 && \
-#    ln -sf libhwloc.so.15.1.0 libhwloc.so.15 && \
-#    ln -sf libhwloc.so.15.1.0 libhwloc.so && \
-#    ln -sf libevent_core-2.1.so.7.0.0 libevent_core-2.1.so.7 && \
-#    ln -sf libevent_core-2.1.so.7 libevent_core-2.1.so && \
-#    ln -sf libevent_pthreads-2.1.so.7.0.0 libevent_pthreads-2.1.so.7 && \
-#    ln -sf libevent_pthreads-2.1.so.7 libevent_pthreads-2.1.so && \
-#    ln -sf libltdl.so.7.3.1 libltdl.so.7 && \
-#    ln -sf libltdl.so.7 libltdl.so
 
 ###########################
 # Package Stage
@@ -167,7 +161,8 @@ COPY --from=build /usr/local/sihpc /usr/local/sihpc
 WORKDIR /
 RUN apt-get update && apt-get install -y --no-install-recommends makeself && \
     SAFE_NCCL_PKG=$(printf '%s\n' "${NCCL_PACKAGE_VERSION}" | tr '+' '-') && \
-    PACKAGE_FILENAME="sicl-nccl${SAFE_NCCL_PKG}-ompi${MPI_VERSION}-ubuntu${UBUNTU_VERSION}-${BUILD_DATE}.run" && \
+    ARCH=$(uname -m) && \
+    PACKAGE_FILENAME="sicl-nccl${SAFE_NCCL_PKG}-ompi${MPI_VERSION}-ubuntu${UBUNTU_VERSION}-${ARCH}-${BUILD_DATE}.run" && \
     { makeself --gzip /usr/local/sihpc \
       "${PACKAGE_FILENAME}" \
       "SiHPC MPI + NCCL + NCCL-tests Portable Installer" \

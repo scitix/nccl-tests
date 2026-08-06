@@ -11,7 +11,7 @@ permissions:
 jobs:
   build-and-release:
     name: build-run (${{ matrix.name }})
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runs-on }}
 
     strategy:
       fail-fast: false
@@ -19,10 +19,20 @@ jobs:
         include:
           - name: cuda12.9-ubuntu22.04
             dockerfile: docker/Dockerfile.cuda12.9.ubuntu22.04
+            runs-on: ubuntu-22.04
+            platform: linux/amd64
           - name: cuda13-ubuntu22.04
             dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04
+            runs-on: ubuntu-22.04
+            platform: linux/amd64
           - name: cuda12.x-rockylinux8
             dockerfile: docker/Dockerfile.cuda12.x.rockylinux8
+            runs-on: ubuntu-22.04
+            platform: linux/amd64
+          - name: cuda13-ubuntu22.04-nccl2.30-arm64
+            dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04.nccl2.30.arm64
+            runs-on: ubuntu-22.04-arm      # native arm64 runner (do NOT use amd64 + QEMU)
+            platform: linux/arm64
 
     steps:
       - name: Checkout source
@@ -53,7 +63,7 @@ jobs:
           BUILD_DATE=$(date +%Y%m%d)
 
           docker buildx build \
-            --platform linux/amd64 \
+            --platform ${{ matrix.platform }} \
             --progress=plain \
             -f ${{ matrix.dockerfile }} \
             --build-arg BUILD_DATE=${BUILD_DATE} \
