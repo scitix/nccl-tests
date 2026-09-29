@@ -29,6 +29,14 @@ jobs:
             dockerfile: docker/Dockerfile.cuda12.x.rockylinux8
             runs-on: ubuntu-22.04
             platform: linux/amd64
+          - name: cuda13-ubuntu22.04-nccl2.30
+            dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04.nccl2.30
+            runs-on: ubuntu-22.04
+            platform: linux/amd64
+          - name: cuda13-rockylinux8-nccl2.30
+            dockerfile: docker/Dockerfile.cuda13.x.rockylinux8.nccl2.30
+            runs-on: ubuntu-22.04
+            platform: linux/amd64
           - name: cuda13-ubuntu22.04-nccl2.30-arm64
             dockerfile: docker/Dockerfile.cuda13.x.ubuntu22.04.nccl2.30.arm64
             runs-on: ubuntu-22.04-arm      # native arm64 runner (do NOT use amd64 + QEMU)
