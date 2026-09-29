@@ -1,0 +1,176 @@
+###########################
+# Build-time configuration
+###########################
+#
+# Rocky Linux 8 variant of the patched NCCL 2.30.7 build.
+# Mirrors docker/Dockerfile.cuda13.x.ubuntu22.04.nccl2.30 but produces a
+# glibc-2.28 (RHEL 8 compatible) .run package instead of an Ubuntu one.
+
+# Base OS and CUDA versions
+ARG ROCKYLINUX_VERSION=8
+ARG CUDA_VERSION=13.1.2
+
+# NCCL versions (built from source and patched — see step 3)
+ARG NCCL_PACKAGE_VERSION=2.30.7-1
+ARG NCCL_SO_VERSION=2.30.7
+# NCCL source build (patched) configuration
+#  - NCCL_SRC_REF     : git tag/branch of NVIDIA/nccl to build
+#  - NCCL_MAX_IB_DEVS : device cap (raised so dense multi-port hosts use all ports)
+#  - NVCC_GENCODE     : optional gencode override to cut build time (empty = NCCL default)
+ARG NCCL_SRC_REF=v2.30.7-1
+ARG NCCL_MAX_IB_DEVS=400
+ARG NVCC_GENCODE=
+
+# OpenMPI versions
+# - MPI_VERSION: full OpenMPI version
+# - MPI_SERIES: major.minor series used in download URL
+ARG MPI_VERSION=4.1.8
+ARG MPI_SERIES=4.1
+
+# Build date (override at build time)
+ARG BUILD_DATE=20260128
+
+###########################
+# Build Stage
+###########################
+FROM nvidia/cuda:${CUDA_VERSION}-devel-rockylinux${ROCKYLINUX_VERSION} AS build
+
+# Re-declare build args for this stage (values are inherited)
+ARG ROCKYLINUX_VERSION
+ARG CUDA_VERSION
+ARG NCCL_PACKAGE_VERSION
+ARG NCCL_SO_VERSION
+ARG NCCL_SRC_REF
+ARG NCCL_MAX_IB_DEVS
+ARG NVCC_GENCODE
+ARG MPI_VERSION
+ARG MPI_SERIES
+ARG BUILD_DATE
+
+WORKDIR /workspace
+
+# -------------------------
+# 1. Base build dependencies
+# -------------------------
+RUN dnf install -y epel-release && \
+    dnf install -y \
+        gcc gcc-c++ make automake autoconf libtool pkgconfig \
+        wget curl git ca-certificates which \
+        python3 python3-pip gzip xz && \
+    dnf clean all
+
+# -------------------------
+# 2. Build NCCL from source (patched: bound IB device enumeration to MAX_IB_DEVS)
+#    Fixes the out-of-bounds write / crash on hosts whose active IB/RoCE ports
+#    exceed MAX_IB_DEVS. Installs to /usr/local/nccl (lib + headers).
+# -------------------------
+RUN { git clone --depth 1 --single-branch -b ${NCCL_SRC_REF} https://github.com/NVIDIA/nccl.git nccl-src > build.log 2>&1 && \
+    cd nccl-src && \
+    sed -i 's/for (int port_num = 1; port_num <= devAttr.phys_port_cnt; port_num++) {/for (int port_num = 1; port_num <= devAttr.phys_port_cnt \&\& ncclNIbDevs < MAX_IB_DEVS; port_num++) {/' src/transport/net_ib/init.cc && \
+    sed -i 's/for (int dev = devOffset; dev < devCount; ++dev) {/for (int dev = devOffset; dev < devCount \&\& ncclNIbDevs < MAX_IB_DEVS; ++dev) {/' src/transport/net_ib/init.cc && \
+    { grep -q 'phys_port_cnt && ncclNIbDevs < MAX_IB_DEVS' src/transport/net_ib/init.cc && \
+      grep -q 'devCount && ncclNIbDevs < MAX_IB_DEVS' src/transport/net_ib/init.cc; } || \
+      { echo "ERROR: NCCL IB-devs guard patch did not apply to ${NCCL_SRC_REF}" >&2; exit 1; } && \
+    sed -i -E "s/#define[[:space:]]+MAX_IB_DEVS[[:space:]]+32/#define MAX_IB_DEVS ${NCCL_MAX_IB_DEVS}/" src/transport/net_ib/common.h && \
+    { [ -n "${NVCC_GENCODE}" ] || unset NVCC_GENCODE; } && \
+    make -j"$(nproc)" src.build ${NVCC_GENCODE:+NVCC_GENCODE="${NVCC_GENCODE}"} >> build.log 2>&1 && \
+    mkdir -p /usr/local/nccl/lib /usr/local/nccl/include && \
+    cp -P build/lib/libnccl.so* /usr/local/nccl/lib/ && \
+    cp -a build/include/. /usr/local/nccl/include/ && \
+    echo /usr/local/nccl/lib > /etc/ld.so.conf.d/nccl.conf && ldconfig && \
+    cd /workspace && rm -rf nccl-src && rm -f build.log; } || (cat build.log && false)
+
+# -------------------------
+# 3. Build OpenMPI from source
+#    Binaries will be linked against glibc 2.28 (Rocky Linux 8 default),
+#    so the resulting .run package runs on any RHEL 8-compatible system.
+# -------------------------
+RUN wget -q https://download.open-mpi.org/release/open-mpi/v${MPI_SERIES}/openmpi-${MPI_VERSION}.tar.gz && \
+    tar zxf openmpi-${MPI_VERSION}.tar.gz && \
+    cd openmpi-${MPI_VERSION} && \
+    ./configure --prefix=/usr/local/sihpc --with-cuda=/usr/local/cuda \
+        --disable-static --enable-shared > /dev/null 2>&1 && \
+    make -j$(nproc) > /dev/null 2>&1 && \
+    make install > /dev/null 2>&1 && \
+    rm -rf /workspace/openmpi-${MPI_VERSION} /workspace/openmpi-${MPI_VERSION}.tar.gz
+
+# -------------------------
+# 4. Build nccl-tests (against the source-built patched NCCL)
+# -------------------------
+RUN git clone --depth 1 --single-branch -b sync/upstream-20251216 https://github.com/scitix/nccl-tests.git > /dev/null 2>&1 && \
+    cd nccl-tests && \
+    { [ -n "${NVCC_GENCODE}" ] || unset NVCC_GENCODE; } && \
+    { make MPI=1 MPI_HOME=/usr/local/sihpc NCCL_HOME=/usr/local/nccl ${NVCC_GENCODE:+NVCC_GENCODE="${NVCC_GENCODE}"} > build.log 2>&1 && rm -f build.log || (cat build.log && false); } && \
+    mkdir -p /usr/local/sihpc/libexec/nccl-tests && \
+    cp -rf build/*_perf /usr/local/sihpc/libexec/nccl-tests/ && \
+    mkdir -p /usr/local/sihpc/bin && \
+    cp scripts/nccl_perf /usr/local/sihpc/bin/nccl_perf && \
+    cp scripts/nccl_test /usr/local/sihpc/libexec/nccl-tests/nccl_test && \
+    cp scripts/env.sh /usr/local/sihpc/env.sh && \
+    cp scripts/install_sihpc /usr/local/sihpc/bin/install_sihpc && \
+    cp scripts/uninstall_sihpc /usr/local/sihpc/bin/uninstall_sihpc && \
+    rm -rf /workspace/nccl-tests
+
+# -------------------------
+# 5. Collect runtime libraries (strict selection)
+# -------------------------
+RUN { set -e && \
+    mkdir -p /usr/local/sihpc/lib > build.log 2>&1 && \
+    cp /usr/local/cuda/lib64/libcudart* /usr/local/sihpc/lib/ >> build.log 2>&1 && \
+    cp -P /usr/local/nccl/lib/libnccl.so* /usr/local/sihpc/lib/ >> build.log 2>&1 && \
+    rm -f build.log; } || (cat build.log && false)
+
+# -------------------------
+# 6. Fix library symlinks
+#    CUDART soname is discovered from the copied file so the links stay correct
+#    regardless of the exact CUDA 13.x patch level of the base image.
+# -------------------------
+RUN cd /usr/local/sihpc/lib && \
+    CUDART_SO=$(basename "$(ls libcudart.so.*.*.* 2>/dev/null | head -1)") && \
+    [ -n "${CUDART_SO}" ] || { echo "ERROR: libcudart.so.* not found" >&2; exit 1; } && \
+    CUDART_MAJOR=$(echo "${CUDART_SO}" | sed -E 's/^libcudart\.so\.([0-9]+)\..*/\1/') && \
+    rm -f libcudart.so "libcudart.so.${CUDART_MAJOR}" && \
+    ln -sf libnccl.so.${NCCL_SO_VERSION} libnccl.so.2 && \
+    ln -sf libnccl.so.2 libnccl.so && \
+    ln -sf "${CUDART_SO}" "libcudart.so.${CUDART_MAJOR}" && \
+    ln -sf "libcudart.so.${CUDART_MAJOR}" libcudart.so
+
+###########################
+# Package Stage
+###########################
+FROM rockylinux:${ROCKYLINUX_VERSION} AS package
+
+# Re-declare args for this stage (values are inherited)
+ARG ROCKYLINUX_VERSION
+ARG NCCL_PACKAGE_VERSION
+ARG MPI_VERSION
+ARG BUILD_DATE
+
+# Expose versions/date as environment variables for runtime shell expansion
+ENV NCCL_PACKAGE_VERSION=${NCCL_PACKAGE_VERSION} \
+    MPI_VERSION=${MPI_VERSION} \
+    BUILD_DATE=${BUILD_DATE}
+
+COPY --from=build /usr/local/sihpc /usr/local/sihpc
+
+WORKDIR /
+
+# makeself is available via EPEL on Rocky Linux 8
+RUN dnf install -y epel-release && \
+    dnf install -y makeself findutils && \
+    dnf clean all && \
+    SAFE_NCCL_PKG=$(printf '%s\n' "${NCCL_PACKAGE_VERSION}" | tr '+' '-') && \
+    PACKAGE_FILENAME="sicl-nccl${SAFE_NCCL_PKG}-ompi${MPI_VERSION}-rockylinux${ROCKYLINUX_VERSION}-${BUILD_DATE}.run" && \
+    { makeself --gzip /usr/local/sihpc \
+        "${PACKAGE_FILENAME}" \
+        "SiHPC MPI + NCCL + NCCL-tests Portable Installer (Rocky Linux ${ROCKYLINUX_VERSION})" \
+        ./bin/install_sihpc > build.log 2>&1 && rm -f build.log; } || (cat build.log && false)
+
+###########################
+# Export Stage
+###########################
+# Use a scratch image so that --output type=local only exports the .run file.
+# This avoids permission errors caused by root-owned OS files being written
+# to the non-root GitHub Actions runner's workspace.
+FROM scratch AS export
+COPY --from=package /*.run /
